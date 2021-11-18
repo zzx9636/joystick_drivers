@@ -60,7 +60,7 @@ int closedir_cb(DIR *dir)
 class Joystick
 {
 private:
-  ros::NodeHandle nh_;
+  ros::NodeHandle nh_; 
   bool open_;
   bool sticky_buttons_;
   bool default_trig_val_;
@@ -82,6 +82,16 @@ private:
   diagnostic_updater::Updater diagnostic_;
 
   typedef std::unique_ptr<DIR, decltype(&closedir)> dir_ptr;
+  // Gain for PID controller
+  double m_max_force = 0.3;
+  double m_min_force = 0.15;
+
+  // motion config 0:PID force, 1:constant force
+  double m_Kp = 0.5;
+  double m_Ki = 0;
+  double m_Kd = 0.1;
+  double m_offset = 0.01;
+
 
   /// \brief Publishes diagnostics and status
   void diagnostics(diagnostic_updater::DiagnosticStatusWrapper& stat)
@@ -263,37 +273,64 @@ public:
   Joystick() : nh_(), diagnostic_(), ff_fd_(-1)
   {}
 
-  void set_feedback(const sensor_msgs::JoyFeedbackArray::ConstPtr& msg)
-  {
-    if (ff_fd_ == -1)
+  
+
+// update input event with writing information to the event file
+void updateFfDevice(double m_current_angle)
+{
+    struct input_event event;
+    static float diff_i = 0.0, diff = 0.0;
+    double diff_d, force, buf;
+
+    // if you wanna use I control, let's avoid integral value exploding
+    // static int count = 0;
+    // count ++;
+    // if (force > 0.3 || count > 10)
+    // {
+        //     diff_i = 0.0;
+        //     count = 0;
+        // }
+
+    // calcurate values for PID control
+    buf = diff;
+    diff = m_current_angle;
+    diff_i += diff;
+    diff_d = diff - buf;
+
+    // force = 0.1;
+   
+    force = fabs(m_Kp * diff + m_Ki * diff_i + m_Kd * diff_d) * ((diff > 0.0) ? 1.0 : -1.0);
+
+    // if wheel angle reached to the target
+    if (fabs(diff) < m_offset)
     {
-      return;  // we arent ready yet
+        force = 0.0;
     }
-
-    size_t size = msg->array.size();
-    for (size_t i = 0; i < size; i++)
+    else
     {
-      // process each feedback
-      if (msg->array[i].type == 1 && ff_fd_ != -1)  // TYPE_RUMBLE
-      {
-        // if id is zero, thats low freq, 1 is high
-        joy_effect_.direction = 0;  // down
-        joy_effect_.type = FF_RUMBLE;
-        if (msg->array[i].id == 0)
-        {
-          joy_effect_.u.rumble.strong_magnitude = (static_cast<float>(0xFFFFU))*msg->array[i].intensity;
-        }
-        else
-        {
-          joy_effect_.u.rumble.weak_magnitude = (static_cast<float>(0xFFFFU))*msg->array[i].intensity;
-        }
-
-        joy_effect_.replay.length = 1000;
-        joy_effect_.replay.delay = 0;
-
-        update_feedback_ = true;
-      }
+        // force less than 0.2 cannot turn the wheel
+        force = (force > 0.0) ? std::max(force, m_min_force) : std::min(force, -m_min_force);
+        // set max force for safety
+        force = (force > 0.0) ? std::min(force, m_max_force) : std::max(force, -m_max_force);
     }
+    
+
+    // for safety
+    force = (force > 0.0) ? std::min(force, m_max_force) : std::max(force, -m_max_force);
+
+    // start effect
+    joy_effect_.u.constant.level = (short)(force * 32767.0);
+    joy_effect_.direction = 0xC000;
+    joy_effect_.u.constant.envelope.attack_level = (short)(force * 32767.0);
+    joy_effect_.u.constant.envelope.fade_level = (short)(force * 32767.0);
+
+    // ROS_INFO_STREAM("Force"<<force);
+
+    //int ret = ioctl(ff_fd_, EVIOCSFF, &joy_effect_);
+
+    if (ioctl(ff_fd_, EVIOCSFF, &joy_effect_) < 0)
+        ROS_ERROR("failed to upload m_effect");
+    
   }
 
   /// \brief Opens joystick port, reads from port and publishes while node is active
@@ -305,7 +342,7 @@ public:
     // Parameters
     ros::NodeHandle nh_param("~");
     pub_ = nh_.advertise<sensor_msgs::Joy>("joy", 1);
-    ros::Subscriber sub = nh_.subscribe("joy/set_feedback", 10, &Joystick::set_feedback, this);
+    // ros::Subscriber sub = nh_.subscribe("joy/set_feedback", 10, &Joystick::set_feedback, this);
     nh_param.param<std::string>("dev", joy_dev_, "/dev/input/js0");
     nh_param.param<std::string>("dev_ff", joy_dev_ff_, "/dev/input/event0");
     nh_param.param<std::string>("dev_name", joy_dev_name_, "");
@@ -316,19 +353,19 @@ public:
     nh_param.param<bool>("sticky_buttons", sticky_buttons_, false);
 
     // Checks on parameters
-    if (!joy_dev_name_.empty())
-    {
-        std::string joy_dev_path = get_dev_by_joy_name(joy_dev_name_);
-        if (joy_dev_path.empty())
-        {
-          ROS_ERROR("Couldn't find a joystick with name %s. Falling back to default device.", joy_dev_name_.c_str());
-        }
-        else
-        {
-          ROS_INFO("Using %s as joystick device.", joy_dev_path.c_str());
-          joy_dev_ = joy_dev_path;
-        }
-    }
+    // if (!joy_dev_name_.empty())
+    // {
+    //     std::string joy_dev_path = get_dev_by_joy_name(joy_dev_name_);
+    //     if (joy_dev_path.empty())
+    //     {
+    //       ROS_ERROR("Couldn't find a joystick with name %s. Falling back to default device.", joy_dev_name_.c_str());
+    //     }
+    //     else
+    //     {
+    //       ROS_INFO("Using %s as joystick device.", joy_dev_path.c_str());
+    //       joy_dev_ = joy_dev_path;
+    //     }
+    // }
 
     if (autorepeat_rate_ > 1 / coalesce_interval_)
     {
@@ -445,7 +482,7 @@ public:
         memset(&joy_effect_, 0, sizeof(joy_effect_));
         joy_effect_.id = -1;
         joy_effect_.direction = 0;  // down
-        joy_effect_.type = FF_RUMBLE;
+        joy_effect_.type = FF_CONSTANT;
         joy_effect_.u.rumble.strong_magnitude = 0;
         joy_effect_.u.rumble.weak_magnitude = 0;
         joy_effect_.replay.length = 1000;
@@ -491,21 +528,24 @@ public:
         // play the rumble effect (can probably do this at lower rate later)
         if (ff_fd_ != -1)
         {
+          
           struct input_event start;
           start.type = EV_FF;
           start.code = joy_effect_.id;
           start.value = 1;
           if (write(ff_fd_, (const void*) &start, sizeof(start)) == -1)
-          {
             break;  // fd closed
-          }
+  
 
-          // upload the effect
-          if (update_feedback_ == true)
-          {
-            int ret = ioctl(ff_fd_, EVIOCSFF, &joy_effect_);
-            update_feedback_ = false;
-          }
+          if (joy_msg.axes.size()>0)
+            updateFfDevice(joy_msg.axes[0]);
+          // // upload the effect
+          // if (update_feedback_ == true)
+          // {
+          //   ROS_INFO("Trying to update ff");
+          //   int ret = ioctl(ff_fd_, EVIOCSFF, &joy_effect_);
+          //   update_feedback_ = false;
+          // }
         }
 
         if (FD_ISSET(joy_fd, &set))
@@ -530,7 +570,7 @@ public:
                 joy_msg.buttons[i] = 0.0;
               }
             }
-            if (sticky_buttons_)
+            if (sticky_buttons_) // on and off switch
             {
               if (event.value == 1)
               {
@@ -605,12 +645,14 @@ public:
               }
 
               publish_soon = true;
+
               break;
             }
             default:
               ROS_WARN("joy_node: Unknown event type. Please file a ticket. "
                 "time=%u, value=%d, type=%Xh, number=%d", event.time, event.value, event.type, event.number);
               break;
+            
           }
         }
         else if (tv_set)  // Assume that the timer has expired.

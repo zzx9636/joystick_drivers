@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="output"  default="screen"    doc="display output to screen or log file"/>  
+  <arg name="dev_id"   default= "0"    doc="Input Device ID of the Joystic" />
+  <arg name="ff_dev_id" default="0"    doc="Force Feedback Event ID"/>
+  <arg name="freq"  default="50"   doc="ROS message frequency"/>
+  <arg name="deadzone" default="0"  doc="Deadzone of the steering wheel"/>
+  <group ns="SteeringWheel">
+    <node pkg="joy" type="joy_node" name="joy" output="$(arg output)">
+      <param name="coalesce_interval" type="double" value="0.02"/>
+      <param name="default_trig_val" value="true"/>
+      <param name="dev" value="/dev/input/js$(arg dev_id)" type="string"/>
+      <param name="dev_ff" value="/dev/input/event$(arg ff_dev_id)" type="string"/>
+      <param name="deadzone" value="$(arg deadzone)" type="double"/>    
+      <param name="autorepeat_rate" value="$(arg freq)" type="double"/> 
+    </node> 
+  </group>
+</launch>
