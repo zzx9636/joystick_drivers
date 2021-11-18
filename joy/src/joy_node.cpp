@@ -46,6 +46,7 @@
 #include <ros/ros.h>
 #include <sensor_msgs/Joy.h>
 #include <sensor_msgs/JoyFeedbackArray.h>
+#include <rc_control_msgs/RCControl.h>
 
 
 int closedir_cb(DIR *dir)
@@ -73,6 +74,7 @@ private:
   int event_count_;
   int pub_count_;
   ros::Publisher pub_;
+  ros::Publisher ctrl_pub_;
   double lastDiagTime_;
 
   int ff_fd_;
@@ -83,14 +85,14 @@ private:
 
   typedef std::unique_ptr<DIR, decltype(&closedir)> dir_ptr;
   // Gain for PID controller
-  double m_max_force = 0.3;
+  double m_max_force = 0.25;
   double m_min_force = 0.15;
 
   // motion config 0:PID force, 1:constant force
-  double m_Kp = 0.5;
+  double m_Kp = 2;
   double m_Ki = 0;
-  double m_Kd = 0.1;
-  double m_offset = 0.01;
+  double m_Kd = 0.2;
+  double m_offset = 0.05;
 
 
   /// \brief Publishes diagnostics and status
@@ -282,38 +284,27 @@ void updateFfDevice(double m_current_angle)
     static float diff_i = 0.0, diff = 0.0;
     double diff_d, force, buf;
 
-    // if you wanna use I control, let's avoid integral value exploding
-    // static int count = 0;
-    // count ++;
-    // if (force > 0.3 || count > 10)
-    // {
-        //     diff_i = 0.0;
-        //     count = 0;
-        // }
-
     // calcurate values for PID control
     buf = diff;
     diff = m_current_angle;
     diff_i += diff;
     diff_d = diff - buf;
 
-    // force = 0.1;
-   
+      
     force = fabs(m_Kp * diff + m_Ki * diff_i + m_Kd * diff_d) * ((diff > 0.0) ? 1.0 : -1.0);
 
     // if wheel angle reached to the target
-    if (fabs(diff) < m_offset)
-    {
-        force = 0.0;
-    }
-    else
+    if (fabs(diff) > m_offset)
     {
         // force less than 0.2 cannot turn the wheel
         force = (force > 0.0) ? std::max(force, m_min_force) : std::min(force, -m_min_force);
         // set max force for safety
         force = (force > 0.0) ? std::min(force, m_max_force) : std::max(force, -m_max_force);
     }
-    
+    else if (m_offset>0)
+    {
+        force = diff/m_offset*m_min_force;
+    }
 
     // for safety
     force = (force > 0.0) ? std::min(force, m_max_force) : std::max(force, -m_max_force);
@@ -342,6 +333,7 @@ void updateFfDevice(double m_current_angle)
     // Parameters
     ros::NodeHandle nh_param("~");
     pub_ = nh_.advertise<sensor_msgs::Joy>("joy", 1);
+    ctrl_pub_ = nh_.advertise<rc_control_msgs::RCControl>("/rc_control_node/g29_control", 1);
     // ros::Subscriber sub = nh_.subscribe("joy/set_feedback", 10, &Joystick::set_feedback, this);
     nh_param.param<std::string>("dev", joy_dev_, "/dev/input/js0");
     nh_param.param<std::string>("dev_ff", joy_dev_ff_, "/dev/input/event0");
@@ -352,20 +344,6 @@ void updateFfDevice(double m_current_angle)
     nh_param.param<bool>("default_trig_val", default_trig_val_, false);
     nh_param.param<bool>("sticky_buttons", sticky_buttons_, false);
 
-    // Checks on parameters
-    // if (!joy_dev_name_.empty())
-    // {
-    //     std::string joy_dev_path = get_dev_by_joy_name(joy_dev_name_);
-    //     if (joy_dev_path.empty())
-    //     {
-    //       ROS_ERROR("Couldn't find a joystick with name %s. Falling back to default device.", joy_dev_name_.c_str());
-    //     }
-    //     else
-    //     {
-    //       ROS_INFO("Using %s as joystick device.", joy_dev_path.c_str());
-    //       joy_dev_ = joy_dev_path;
-    //     }
-    // }
 
     if (autorepeat_rate_ > 1 / coalesce_interval_)
     {
@@ -507,6 +485,7 @@ void updateFfDevice(double m_current_angle)
       tv.tv_sec = 1;
       tv.tv_usec = 0;
       sensor_msgs::Joy joy_msg;  // Here because we want to reset it on device close.
+      rc_control_msgs::RCControl ctrl_msg;
       double val;  // Temporary variable to hold event values
       while (nh_.ok())
       {
@@ -539,13 +518,6 @@ void updateFfDevice(double m_current_angle)
 
           if (joy_msg.axes.size()>0)
             updateFfDevice(joy_msg.axes[0]);
-          // // upload the effect
-          // if (update_feedback_ == true)
-          // {
-          //   ROS_INFO("Trying to update ff");
-          //   int ret = ioctl(ff_fd_, EVIOCSFF, &joy_effect_);
-          //   update_feedback_ = false;
-          // }
         }
 
         if (FD_ISSET(joy_fd, &set))
@@ -669,6 +641,19 @@ void updateFfDevice(double m_current_angle)
           joy_msg.header.stamp = ros::Time().now();
           joy_msg.header.frame_id = joy_dev_.c_str();
           pub_.publish(joy_msg);
+
+          
+
+          // publish the esc control command
+          ctrl_msg.header.stamp = joy_msg.header.stamp;
+          ctrl_msg.steer = joy_msg.axes[0];
+          // throttle is axis 2, brake is axis 3
+          if (joy_msg.axes[3]>-1.0)
+            ctrl_msg.throttle = - (joy_msg.axes[3]+1)/2.0;
+          else
+            ctrl_msg.throttle = (joy_msg.axes[2]+1)/2.0;
+          
+          ctrl_pub_.publish(ctrl_msg);
 
           publish_now = false;
           tv_set = false;

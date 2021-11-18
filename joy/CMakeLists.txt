@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Load catkin and all dependencies required for this package
-set(CATKIN_DEPS roscpp diagnostic_updater sensor_msgs roslint)
+set(CATKIN_DEPS roscpp diagnostic_updater sensor_msgs roslint rc_control_msgs)
 find_package(catkin REQUIRED ${CATKIN_DEPS})
 
 roslint_cpp()
